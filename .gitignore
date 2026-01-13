@@ -1,0 +1,9 @@
+# Ignore credential and token files
+credentials.json
+token.json
+api_config.json
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.env
