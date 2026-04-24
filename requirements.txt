@@ -1,5 +1,7 @@
-# Force update: 2026-04-24T10:44:00
+# Force update: 2026-04-24T10:49:00
 opencv-python-headless
+torch>=2.0.0
+torchvision>=0.15.0
 streamlit>=1.32.0
 streamlit-extras>=0.4.0
 
