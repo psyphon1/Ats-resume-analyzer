@@ -1,7 +1,5 @@
-# Force update: 2026-04-24T10:49:00
+# Force update: 2026-04-24T10:44:00
 opencv-python-headless
-torch>=2.0.0
-torchvision>=0.15.0
 streamlit>=1.32.0
 streamlit-extras>=0.4.0
 
@@ -24,6 +22,7 @@ langchain-groq>=0.1.0
 # Vector Store & Embeddings
 faiss-cpu>=1.8.0
 sentence-transformers>=2.7.0
+torchvision
 
 # Google Integration
 gspread>=5.12.0
