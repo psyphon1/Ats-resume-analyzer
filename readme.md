@@ -21,7 +21,7 @@ A production-ready AI-powered resume parsing and analysis system with intelligen
 ### Installation
 1. **Clone & Install**
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/psyphon1/Ats-resume-analyzer
 cd Ats-resume-analyzer
 pip install -r requirements.txt
 ```
@@ -61,4 +61,4 @@ Core dependencies include:
 Feel free to fork and submit PRs. For major changes, please open an issue first.
 
 ---
-**Enhanced with ❤️ by Antigravity AI**
+**Built By Chinmay Duse(psyphon1)**
