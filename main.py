@@ -49,11 +49,10 @@ CONFIG = {
     "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
     "chunk_size": 4000,  
     "chunk_overlap": 0,
-    "max_resume_chars": 5000,
-    "config_file": "api_config.json",
+    "max_resume_chars": 8000,
     "max_tokens": 1500,
-    "temperature": 0.05,
-    "max_workers": 3,
+    "temperature": 0.1,
+    "max_workers": 4,
     "retry_delay": 2,
     "max_retries": 3
 }
@@ -99,20 +98,40 @@ class GoogleDriveHandler:
     def __init__(self, extractor):
         self.extractor = extractor
         creds = None
-        if os.path.exists('token.json'):
+        
+        # Try loading from streamlit secrets first (recommended for Cloud)
+        if "google_credentials" in st.secrets:
+            creds = Credentials.from_authorized_user_info(st.secrets["google_credentials"], GOOGLE_SCOPES)
+        elif os.path.exists('token.json'):
             creds = Credentials.from_authorized_user_file('token.json', GOOGLE_SCOPES)
+            
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
+                try:
+                    creds.refresh(Request())
+                except:
+                    creds = None
+            
+            if not creds:
+                # On Streamlit Cloud, we can't run a local server
+                if os.environ.get("STREAMLIT_RUNTIME_ENV") == "cloud" or not os.path.exists('credentials.json'):
+                    logger.warning("Google Credentials missing or invalid. Skipping Drive integration.")
+                    self.gc = None
+                    self.drive = None
+                    return
+                
                 flow = InstalledAppFlow.from_client_secrets_file('credentials.json', GOOGLE_SCOPES)
                 creds = flow.run_local_server(port=0)
-            with open('token.json', 'w') as token:
-                token.write(creds.to_json())
+                with open('token.json', 'w') as token:
+                    token.write(creds.to_json())
+                    
         self.gc = gspread.authorize(creds)
         self.drive = build('drive', 'v3', credentials=creds)
     
     def process_sheet(self, url: str):
+        if not self.gc:
+            yield {"error": "Google Drive integration not configured. Please use direct file upload or check documentation for setup."}, 0, 0
+            return
         try:
             sheet = self.gc.open_by_url(url).get_worksheet(0)
             records = sheet.get_all_records()
@@ -170,8 +189,10 @@ class ResumeAnalyzer:
     def __init__(self, api_key: str):
         self.client = Groq(api_key=api_key)
     
-    def analyze_resume(self, text: str, meta: Dict = None) -> Dict:
-        prompt = f"""Analyze this resume and extract data as JSON.
+    def analyze_resume(self, text: str, meta: Dict = None, jd: str = None) -> Dict:
+        jd_prompt = f"\n\nTarget Job Description:\n{jd}" if jd else ""
+        prompt = f"""Analyze this resume and extract data as JSON. 
+If a Job Description is provided, calculate a match score based on skills, experience, and role alignment.{jd_prompt}
 
 Resume Text:
 {text[:CONFIG['max_resume_chars']]}
@@ -181,21 +202,22 @@ JSON format:
     "name": "Full Name",
     "email": "email@example.com",
     "phone": "1234567890",
-    "skills": ["Skill1", "Skill2", "Skill3"],
+    "skills": ["Skill1", "Skill2"],
     "education": "Degree - University",
-    "experience_years": 0.0
+    "experience_years": 0.0,
+    "match_percentage": 0,
+    "matching_skills": ["S1"],
+    "missing_skills": ["S2"],
+    "summary": "Brief 1-sentence professional summary",
+    "certifications": ["Cert1"],
+    "education_level": "Bachelors/Masters/PhD"
 }}
 
 RULES:
-1. **Experience Calculation**: 
-   - Identify every job/role and its duration.
-   - Sum the total duration in years.
-   - If a job is "Present" or "Current", assume end date is 2025.
-   - Example: 2018-2020 (2y) + 2021-Present (4y) = 6.0 years.
-   - Return strictly a number (float).
-2. **Skills**: Extract technical, tools, and soft skills (Min 10).
-3. **Phone**: Extract only digits (10-15 digits).
-4. **Name**: If not found in text, use filename from metadata.
+1. **Experience**: Be precise. Sum total years across all roles. 
+2. **Match Score**: Be critical. A 100% match should be extremely rare. Compare specific technical depth.
+3. **Skills**: Categorize into Technical, Soft, and Tools if possible (return as flat list).
+4. **Summary**: Write a compelling one-sentence pitch for this candidate.
 """
         for attempt in range(CONFIG["max_retries"]):
             try:
@@ -209,30 +231,23 @@ RULES:
                 
                 data = json.loads(resp.choices[0].message.content)
                 
-                if not data.get("phone") or data["phone"] == "N/A":
-                    data["phone"] = self._extract_phone(text)
-                else:
-                    data["phone"] = re.sub(r'\D', '', str(data["phone"]))[-10:]
+                # Post-processing
+                data["phone"] = self._extract_phone(text) if not data.get("phone") else re.sub(r'\D', '', str(data["phone"]))[-10:]
+                data["email"] = self._extract_regex(text, r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b') if not data.get("email") else data["email"]
                 
-                if not data.get("email") or data["email"] == "N/A":
-                    data["email"] = self._extract_regex(text, r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b')
-                
-                if not data.get("skills") or len(data.get("skills", [])) < 5:
-                    extracted = self._extract_skills(text)
-                    if len(extracted) > len(data.get("skills", [])):
-                        data["skills"] = extracted
-                
-                if not data.get("experience_years") or data.get("experience_years") == 0:
+                if not data.get("experience_years"):
                     data["experience_years"] = self._calc_exp_fallback(text)
                 
-                data["ats_score"] = self._calc_score_enhanced(data)
-                
+                # ATS Score is a composite of data quality + JD match
+                base_score = self._calc_score_enhanced(data)
+                if jd and data.get("match_percentage", 0) > 0:
+                    data["ats_score"] = int((base_score * 0.3) + (data["match_percentage"] * 0.7))
+                else:
+                    data["ats_score"] = base_score
+
                 if meta:
                     if data.get("name") == "Full Name" or not data.get("name"):
-                        for k, v in meta.items():
-                            if "name" in k.lower():
-                                data["name"] = v
-                                break
+                        data["name"] = meta.get("filename", meta.get("Name", "Unknown"))
 
                 return data
                 
@@ -363,58 +378,156 @@ Answer concisely based on context."""
     def get_candidate(self, idx: int) -> Optional[Dict]:
         return self.candidates_data[idx] if 0 <= idx < len(self.candidates_data) else None
 
-def load_api_key() -> str:
-    return json.load(open(CONFIG["config_file"])).get("groq_api_key", "") if os.path.exists(CONFIG["config_file"]) else ""
+def get_api_key():
+    """Retrieve API key from secrets, environment, or session state."""
+    if "groq_api_key" in st.secrets:
+        return st.secrets["groq_api_key"]
+    if os.environ.get("GROQ_API_KEY"):
+        return os.environ.get("GROQ_API_KEY")
+    return st.session_state.get("custom_api_key", "")
 
 def save_api_key(k: str):
-    with open(CONFIG["config_file"], 'w') as f:
-        json.dump({"groq_api_key": k}, f)
+    st.session_state["custom_api_key"] = k
 
 def process_resume_parallel(args):
-    text, meta, analyzer = args
-    return analyzer.analyze_resume(text, meta)
+    text, meta, analyzer, jd = args
+    return analyzer.analyze_resume(text, meta, jd)
+
+def apply_custom_style():
+    st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    
+    html, body, [data-testid="stSidebar"] {
+        font-family: 'Inter', sans-serif;
+    }
+    
+    .main {
+        background-color: #f8fafc;
+    }
+    
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 24px;
+        background-color: transparent;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        white-space: pre-wrap;
+        background-color: white;
+        border-radius: 10px 10px 0px 0px;
+        gap: 1px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        border: 1px solid #e2e8f0;
+    }
+
+    .stTabs [aria-selected="true"] {
+        background-color: #3b82f6 !important;
+        color: white !important;
+    }
+    
+    div[data-testid="stMetricValue"] {
+        font-size: 2rem;
+        font-weight: 700;
+        color: #1e293b;
+    }
+    
+    .stButton>button {
+        width: 100%;
+        border-radius: 8px;
+        height: 3em;
+        background-color: #3b82f6;
+        color: white;
+        font-weight: 600;
+        border: none;
+        transition: all 0.3s ease;
+    }
+    
+    .stButton>button:hover {
+        background-color: #2563eb;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    }
+    
+    .css-1offfwp {
+        background-color: #ffffff;
+        border-radius: 12px;
+        padding: 2rem;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    }
+    
+    /* Chat styling */
+    .stChatMessage {
+        border-radius: 12px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+    }
+    /* Dataframe styling */
+    .stDataFrame {
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+    }
+    
+    /* Metrics styling */
+    [data-testid="stMetric"] {
+        background-color: white;
+        padding: 1rem;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 def main():
-    st.set_page_config(page_title="Resume Analyzer", page_icon="📋", layout="wide")
+    st.set_page_config(page_title="ATS Resume Analyzer Pro", page_icon="🚀", layout="wide")
+    apply_custom_style()
     
-    st.markdown("""<style>
-    .stChatFloatingInputContainer { position: fixed; bottom: 0; left: 0; right: 0; background: white; padding: 1rem; z-index: 999; }
-    .main .block-container { padding-bottom: 120px; }
-    .stButton button { border-radius: 8px; }
-    </style>""", unsafe_allow_html=True)
-    
-    for k in ["candidates", "rag_pipeline", "chat_history", "trigger_query"]:
+    # Initialize session state
+    for k in ["candidates", "rag_pipeline", "chat_history", "trigger_query", "jd_text"]:
         if k not in st.session_state:
-            st.session_state[k] = [] if k != "rag_pipeline" and k != "trigger_query" else None
+            st.session_state[k] = [] if k in ["candidates", "chat_history"] else (None if k != "jd_text" else "")
     
     if "trigger_query" not in st.session_state:
         st.session_state.trigger_query = False
 
-    api_key = load_api_key()
-    
-    if not api_key:
-        st.title("🔐 Setup Required")
-        with st.form("api"):
-            k = st.text_input("Groq API Key", type="password", placeholder="gsk_...")
-            if st.form_submit_button("Save"):
-                save_api_key(k)
-                st.rerun()
-        st.stop()
-    
-    st.title("📋 Resume Analyzer & Chatbot")
+    api_key = get_api_key()
     
     with st.sidebar:
-        st.markdown("### ⚙️ Settings")
-        if st.button("🔄 Reset API"):
-            os.remove(CONFIG["config_file"])
-            st.rerun()
-        if st.button("🗑️ Clear Data"):
-            st.session_state.clear()
-            st.rerun()
+        st.title("⚙️ Configuration")
+        if not api_key:
+            st.warning("Groq API Key not found!")
+            new_key = st.text_input("Enter Groq API Key", type="password")
+            if st.button("Save Key"):
+                save_api_key(new_key)
+                st.rerun()
+        else:
+            st.success("API Key Active")
+            if st.button("Change API Key"):
+                st.session_state.custom_api_key = ""
+                st.rerun()
         
         st.markdown("---")
-        if st.session_state.candidates:
-            st.metric("Total Candidates", len(st.session_state.candidates))
+        st.markdown("### 📋 Job Description")
+        st.session_state.jd_text = st.text_area("Paste the target Job Description here to get accuracy scores.", 
+                                               value=st.session_state.jd_text, height=250)
+        
+        st.markdown("---")
+        with st.expander("📖 How to Use"):
+            st.markdown("""
+            1. **Set API Key**: Enter your Groq API key above.
+            2. **Add JD**: Paste the Job Description in the text area.
+            3. **Upload**: Drag & drop resumes (PDF, Docx, Images).
+            4. **Analyze**: Click '🚀 Process' to start.
+            5. **Insights**:
+               - **Chatbot**: Ask questions about candidates.
+               - **Results**: See scores, matches, and visualizations.
+            """)
+        
+        if st.button("🗑️ Clear All Data"):
+            st.session_state.clear()
+            st.rerun()
     
     tab1, tab2, tab3 = st.tabs(["📥 Upload", "💬 Chatbot", "📊 Results"])
     
@@ -435,7 +548,6 @@ def main():
             analyzer = ResumeAnalyzer(api_key)
             candidates = []
             file_data = []
-            
             if files:
                 prog = st.progress(0)
                 status = st.empty()
@@ -449,19 +561,21 @@ def main():
                     except: pass
                     
                     if text:
-                        file_data.append((text, {"filename": f.name}, analyzer))
+                        file_data.append((text, {"filename": f.name}, analyzer, st.session_state.jd_text))
                     prog.progress((idx + 1) / len(files))
                     status.text(f"Extracted {idx+1}/{len(files)}")
             
             if file_data:
-                batch_size = 3
-                for i in range(0, len(file_data), batch_size):
-                    batch = file_data[i:i+batch_size]
-                    with ThreadPoolExecutor(max_workers=CONFIG["max_workers"]) as exe:
-                        futures = [exe.submit(process_resume_parallel, x) for x in batch]
-                        for f in as_completed(futures):
-                            if f.result(): candidates.append(f.result())
-                    time.sleep(1)
+                with st.spinner("Analyzing resumes with AI..."):
+                    batch_size = 4
+                    for i in range(0, len(file_data), batch_size):
+                        batch = file_data[i:i+batch_size]
+                        with ThreadPoolExecutor(max_workers=CONFIG["max_workers"]) as exe:
+                            futures = [exe.submit(process_resume_parallel, x) for x in batch]
+                            for f in as_completed(futures):
+                                res = f.result()
+                                if res: candidates.append(res)
+                        time.sleep(0.5)
             
             if sheet:
                 handler = GoogleDriveHandler(ext)
@@ -470,17 +584,17 @@ def main():
                         st.error(data["error"])
                         continue
                     if data.get("text"):
-                        candidates.append(analyzer.analyze_resume(data["text"], data.get("metadata")))
+                        candidates.append(analyzer.analyze_resume(data["text"], data.get("metadata"), st.session_state.jd_text))
 
             if candidates:
                 st.session_state.candidates = sorted(candidates, key=lambda x: x.get("ats_score", 0), reverse=True)
                 rag = RAGPipeline(api_key)
                 rag.build_vector_store(st.session_state.candidates)
                 st.session_state.rag_pipeline = rag
-                st.success(f"Processed {len(candidates)} resumes!")
+                st.success(f"Successfully processed {len(candidates)} resumes!")
                 st.balloons()
             else:
-                st.error("No data extracted.")
+                st.error("No data could be extracted. Please check file formats.")
 
     with tab2:
         if not st.session_state.rag_pipeline:
@@ -526,44 +640,60 @@ def main():
 
     with tab3:
         if st.session_state.candidates:
-            # Modified Column Sequence
-            filtered_data = []
-            columns_to_keep = ['name', 'education', 'ats_score', 'skills', 'email', 'phone', 'experience_years']
+            st.header("📊 Analysis Overview")
             
+            # Overview Metrics
+            m1, m2, m3 = st.columns(3)
+            avg_score = sum(c.get('ats_score', 0) for c in st.session_state.candidates) / len(st.session_state.candidates)
+            top_score = max(c.get('ats_score', 0) for c in st.session_state.candidates)
+            m1.metric("Avg ATS Score", f"{avg_score:.1f}")
+            m2.metric("Top Score", f"{top_score}")
+            m3.metric("Candidates", len(st.session_state.candidates))
+
+            # Distribution Chart
+            import plotly.express as px
+            df_scores = pd.DataFrame([{"Name": c.get('name'), "Score": c.get('ats_score', 0)} for c in st.session_state.candidates])
+            fig = px.bar(df_scores, x="Name", y="Score", title="ATS Score Distribution", 
+                         color="Score", color_continuous_scale="RdYlGn")
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.divider()
+            
+            # Main Data Table
+            filtered_data = []
+            columns_to_keep = ['name', 'ats_score', 'match_percentage', 'experience_years', 'skills', 'education', 'email']
             for c in st.session_state.candidates:
                 row = {k: c.get(k, 'N/A') for k in columns_to_keep}
-                
                 if isinstance(row['skills'], list):
-                    row['skills'] = ", ".join([str(s) for s in row['skills']])
-                
-                row['phone'] = re.sub(r'\D', '', str(row['phone']))
-                
+                    row['skills'] = ", ".join(row['skills'])
                 filtered_data.append(row)
             
             df = pd.DataFrame(filtered_data)
+            st.dataframe(df.rename(columns={
+                'name': 'Name', 'ats_score': 'ATS Score', 'match_percentage': 'JD Match %',
+                'experience_years': 'Exp (Yrs)', 'skills': 'Top Skills', 'education': 'Education'
+            }), use_container_width=True)
+
+            # Detailed Candidate View
+            st.subheader("🔍 Detailed Candidate Insights")
+            selected_name = st.selectbox("Select Candidate to view details", [c.get('name') for c in st.session_state.candidates])
+            if selected_name:
+                cand = next(c for c in st.session_state.candidates if c.get('name') == selected_name)
+                c1, c2 = st.columns([1, 2])
+                with c1:
+                    st.metric("ATS Score", cand.get('ats_score', 0))
+                    st.metric("JD Match", f"{cand.get('match_percentage', 0)}%")
+                with c2:
+                    st.write(f"**Summary:** {cand.get('summary', 'N/A')}")
+                    st.write(f"**Matching Skills:** {', '.join(cand.get('matching_skills', []))}")
+                    st.write(f"**Missing Skills:** {', '.join(cand.get('missing_skills', []))}")
             
-            # Rename for display
-            display_df = df.rename(columns={
-                'name': 'Name', 'education': 'Education', 'ats_score': 'ATS Score', 
-                'skills': 'Skills', 'email': 'Email', 'phone': 'Phone', 
-                'experience_years': 'Exp (Years)'
-            })
-            
-            st.dataframe(display_df, use_container_width=True)
-            
+            st.divider()
             csv_buf = io.StringIO()
-            csv_buf.write(','.join(display_df.columns) + '\n')
-            
-            for _, row in display_df.iterrows():
-                row_dict = row.to_dict()
-                phone_val = row_dict['Phone']
-                if phone_val and str(phone_val) != 'N/A':
-                    row_dict['Phone'] = f'="{phone_val}"' 
-                
-                row_vals = [f'"{str(v)}"' if k != 'Phone' else str(v) for k, v in row_dict.items()]
-                csv_buf.write(','.join(row_vals) + '\n')
-            
-            st.download_button("Download CSV", csv_buf.getvalue(), "resumes.csv", "text/csv")
+            df.to_csv(csv_buf, index=False)
+            st.download_button("📥 Download Full Report (CSV)", csv_buf.getvalue(), "ats_results.csv", "text/csv")
+        else:
+            st.info("No candidates processed yet. Go to the Upload tab to start.")
 
 if __name__ == "__main__":
     main()
