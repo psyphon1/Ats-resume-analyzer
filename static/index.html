@@ -1,0 +1,1197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ATS Resume Analyzer Pro</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --surface-2: #334155;
+            --border: #475569;
+            --accent: #6366f1;
+            --accent-2: #818cf8;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --text: #e2e8f0;
+            --text-muted: #94a3b8;
+            --radius: 12px;
+            --shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, var(--bg) 0%, #1a1f35 100%);
+            color: var(--text);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Header */
+        .header {
+            background: rgba(30, 41, 59, 0.95);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            padding: 1rem 2rem;
+        }
+
+        .header-content {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            font-size: 1.5rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .header-stats {
+            display: flex;
+            gap: 2rem;
+        }
+
+        .stat {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--accent);
+        }
+
+        .stat-label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+        }
+
+        /* Container */
+        .container {
+            max-width: 1400px;
+            margin: 2rem auto;
+            padding: 0 2rem;
+        }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 2rem;
+            border-bottom: 2px solid var(--border);
+        }
+
+        .tab {
+            padding: 1rem 1.5rem;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            border-bottom: 3px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .tab:hover {
+            color: var(--text);
+        }
+
+        .tab.active {
+            color: var(--accent);
+            border-bottom-color: var(--accent);
+        }
+
+        /* Content Panels */
+        .content {
+            display: none;
+        }
+
+        .content.active {
+            display: block;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* Upload Section */
+        .upload-area {
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(129, 140, 248, 0.1));
+            border: 2px dashed var(--accent);
+            border-radius: var(--radius);
+            padding: 3rem 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .upload-area:hover {
+            border-color: var(--accent-2);
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(129, 140, 248, 0.15));
+        }
+
+        .upload-area.dragover {
+            border-color: var(--success);
+            background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(16, 185, 129, 0.1));
+        }
+
+        .upload-text {
+            font-size: 1.2rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .upload-hint {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+
+        /* Input Styles */
+        input[type="file"],
+        input[type="text"],
+        textarea,
+        select {
+            display: none;
+        }
+
+        .file-input-wrapper {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+        }
+
+        .file-input-wrapper input[type="file"] {
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            cursor: pointer;
+            opacity: 0;
+        }
+
+        /* Form Styles */
+        .form-group {
+            margin-bottom: 1.5rem;
+            display: grid;
+            gap: 0.5rem;
+        }
+
+        label {
+            font-weight: 600;
+            font-size: 0.95rem;
+            color: var(--text);
+        }
+
+        input, textarea, select {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 0.75rem 1rem;
+            color: var(--text);
+            font-size: 0.95rem;
+            transition: all 0.3s ease;
+        }
+
+        input:focus, textarea:focus, select:focus {
+            outline: none;
+            border-color: var(--accent);
+            background: rgba(99, 102, 241, 0.1);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 120px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 0.9rem;
+        }
+
+        /* Button Styles */
+        .button {
+            padding: 0.8rem 1.5rem;
+            border: none;
+            border-radius: var(--radius);
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .button-primary {
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            color: white;
+        }
+
+        .button-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(99, 102, 241, 0.4);
+        }
+
+        .button-primary:active {
+            transform: translateY(0);
+        }
+
+        .button-secondary {
+            background: var(--surface-2);
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
+        .button-secondary:hover {
+            background: var(--border);
+        }
+
+        .button-danger {
+            background: var(--danger);
+            color: white;
+        }
+
+        .button-danger:hover {
+            opacity: 0.9;
+        }
+
+        .button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Card Styles */
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            transition: all 0.3s ease;
+        }
+
+        .card:hover {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+        }
+
+        /* Candidate Card */
+        .candidate-card {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 1.5rem;
+            align-items: start;
+        }
+
+        .candidate-info h3 {
+            font-size: 1.2rem;
+            margin-bottom: 0.5rem;
+            color: var(--text);
+        }
+
+        .candidate-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+
+        .meta-item {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+
+        .meta-label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .meta-value {
+            font-weight: 600;
+            color: var(--accent);
+        }
+
+        /* Score Badge */
+        .score-badge {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.5rem;
+            min-width: 120px;
+        }
+
+        .score-circle {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.8rem;
+            font-weight: 700;
+            background: var(--surface-2);
+            border: 3px solid var(--accent);
+            position: relative;
+        }
+
+        .score-circle.excellent {
+            border-color: var(--success);
+            color: var(--success);
+        }
+
+        .score-circle.good {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .score-circle.fair {
+            border-color: var(--warning);
+            color: var(--warning);
+        }
+
+        .score-circle.weak {
+            border-color: var(--danger);
+            color: var(--danger);
+        }
+
+        .score-label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-align: center;
+        }
+
+        /* Skills */
+        .skills {
+            margin-top: 1rem;
+        }
+
+        .skills-title {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+        }
+
+        .skills-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+
+        .skill-tag {
+            background: rgba(99, 102, 241, 0.2);
+            color: var(--accent);
+            padding: 0.4rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            border: 1px solid rgba(99, 102, 241, 0.4);
+        }
+
+        /* Progress Bar */
+        .progress-bar {
+            background: var(--surface-2);
+            border-radius: 10px;
+            overflow: hidden;
+            height: 8px;
+            margin: 1rem 0;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent), var(--accent-2));
+            transition: width 0.3s ease;
+        }
+
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(5px);
+        }
+
+        .modal.active {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-content {
+            background: var(--surface);
+            border-radius: var(--radius);
+            padding: 2rem;
+            width: 90%;
+            max-width: 800px;
+            max-height: 90vh;
+            overflow-y: auto;
+            border: 1px solid var(--border);
+        }
+
+        .modal-header {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 1.5rem;
+            cursor: pointer;
+            transition: color 0.3s ease;
+        }
+
+        .modal-close:hover {
+            color: var(--text);
+        }
+
+        /* Alert Messages */
+        .alert {
+            padding: 1rem;
+            border-radius: var(--radius);
+            margin-bottom: 1rem;
+            border-left: 4px solid;
+        }
+
+        .alert-success {
+            background: rgba(16, 185, 129, 0.1);
+            border-left-color: var(--success);
+            color: var(--success);
+        }
+
+        .alert-error {
+            background: rgba(239, 68, 68, 0.1);
+            border-left-color: var(--danger);
+            color: var(--danger);
+        }
+
+        .alert-info {
+            background: rgba(99, 102, 241, 0.1);
+            border-left-color: var(--accent);
+            color: var(--accent);
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .container {
+                padding: 0 1rem;
+            }
+
+            .header-content {
+                flex-direction: column;
+                gap: 1rem;
+            }
+
+            .candidate-card {
+                grid-template-columns: 1fr;
+            }
+
+            .modal-content {
+                width: 95%;
+                padding: 1.5rem;
+            }
+        }
+
+        /* Loading Spinner */
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(99, 102, 241, 0.3);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Candidate List */
+        .candidates-list {
+            display: grid;
+            gap: 1.5rem;
+        }
+
+        .candidates-filter {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+        }
+
+        .filter-select {
+            display: flex !important;
+            padding: 0.75rem 1rem !important;
+            background: var(--surface) !important;
+            border: 1px solid var(--border) !important;
+            border-radius: var(--radius) !important;
+            color: var(--text) !important;
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <div class="header">
+        <div class="header-content">
+            <div class="logo">📄 ATS Resume Analyzer Pro</div>
+            <div class="header-stats">
+                <div class="stat">
+                    <div class="stat-value" id="totalCandidates">0</div>
+                    <div class="stat-label">Candidates</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="avgScore">--</div>
+                    <div class="stat-label">Avg Score</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="container">
+        <!-- Tabs -->
+        <div class="tabs">
+            <button class="tab active" data-tab="upload">📤 Upload</button>
+            <button class="tab" data-tab="candidates">👥 Candidates</button>
+            <button class="tab" data-tab="rag">🔍 RAG Search</button>
+            <button class="tab" data-tab="settings">⚙️ Settings</button>
+        </div>
+
+        <!-- Upload Tab -->
+        <div id="upload" class="content active">
+            <div class="card">
+                <h2>Upload Resumes</h2>
+                <p style="color: var(--text-muted); margin: 1rem 0;">
+                    Upload resumes in PDF, DOCX, or image format. Optionally provide a job description for matching analysis.
+                </p>
+
+                <div class="form-group">
+                    <label>Groq API Key (optional - uses env if not set)</label>
+                    <input type="password" id="apiKey" placeholder="Enter your Groq API key...">
+                </div>
+
+                <div class="form-group">
+                    <label>Job Description (optional)</label>
+                    <textarea id="jobDescription" placeholder="Paste the job description here for skill matching..."></textarea>
+                </div>
+
+                <div class="upload-area" id="uploadArea" ondrop="handleDrop(event)" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)">
+                    <div class="upload-text">📁 Drop files here or click to select</div>
+                    <div class="upload-hint">Supported: PDF, DOCX, PNG, JPG</div>
+                    <input type="file" id="fileInput" multiple accept=".pdf,.docx,.png,.jpg,.jpeg">
+                </div>
+
+                <div style="display: flex; gap: 1rem; margin-top: 1.5rem;">
+                    <button class="button button-primary" onclick="uploadFiles()">
+                        <span id="uploadBtnText">📤 Upload Resume(s)</span>
+                        <span id="uploadSpinner" style="display: none;" class="spinner"></span>
+                    </button>
+                    <button class="button button-secondary" onclick="clearAll()">Clear All</button>
+                </div>
+
+                <div id="uploadStatus"></div>
+            </div>
+        </div>
+
+        <!-- Candidates Tab -->
+        <div id="candidates" class="content">
+            <div class="card">
+                <h2>Candidate Pool</h2>
+
+                <div class="candidates-filter">
+                    <select class="filter-select" id="sortBy" onchange="sortCandidates(this.value)" style="display: flex !important;">
+                        <option value="ats_score">Sort by ATS Score</option>
+                        <option value="match">Sort by JD Match</option>
+                        <option value="experience">Sort by Experience</option>
+                    </select>
+                </div>
+
+                <div class="candidates-list" id="candidatesList">
+                    <div style="text-align: center; padding: 2rem; color: var(--text-muted);">
+                        No candidates yet. Upload resumes to get started.
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- RAG Tab -->
+        <div id="rag" class="content">
+            <div class="card">
+                <h2>🔍 Search Candidates with AI</h2>
+                <p style="color: var(--text-muted); margin: 1rem 0;">
+                    Build a searchable database of your candidates and ask natural language questions.
+                </p>
+
+                <div class="form-group">
+                    <label>Groq API Key (required)</label>
+                    <input type="password" id="ragApiKey" placeholder="Enter your Groq API key...">
+                </div>
+
+                <button class="button button-primary" onclick="buildRag()" style="margin-bottom: 2rem;">
+                    🏗️ Build RAG Pipeline
+                </button>
+
+                <div id="ragStatus"></div>
+
+                <div style="margin-top: 2rem; display: none;" id="ragQuery">
+                    <h3>Query Your Candidates</h3>
+                    <div class="form-group" style="margin-top: 1rem;">
+                        <textarea id="ragQuestion" placeholder="Ask anything about your candidates... e.g., 'Find candidates with ML experience and 5+ years'"></textarea>
+                    </div>
+                    <button class="button button-primary" onclick="queryRag()">
+                        <span id="queryBtnText">🔍 Search</span>
+                        <span id="querySpinner" style="display: none;" class="spinner"></span>
+                    </button>
+                    <div id="ragResult" style="margin-top: 2rem;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Settings Tab -->
+        <div id="settings" class="content">
+            <div class="card">
+                <h2>⚙️ Settings & Export</h2>
+
+                <div class="form-group">
+                    <label>Groq API Key</label>
+                    <input type="password" id="defaultApiKey" placeholder="Set default API key...">
+                    <small style="color: var(--text-muted); margin-top: 0.5rem;">
+                        Leave empty to use environment variable GROQ_API_KEY
+                    </small>
+                </div>
+
+                <button class="button button-primary" onclick="exportCandidates()" style="margin-top: 1.5rem;">
+                    📥 Export as JSON
+                </button>
+
+                <button class="button button-danger" onclick="resetApp()" style="margin-top: 1rem;">
+                    🔄 Reset Application
+                </button>
+
+                <div id="settingsStatus" style="margin-top: 1.5rem;"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detail Modal -->
+    <div class="modal" id="detailModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span id="modalTitle">Candidate Details</span>
+                <button class="modal-close" onclick="closeModal()">×</button>
+            </div>
+            <div id="modalBody"></div>
+        </div>
+    </div>
+
+    <script>
+        // Global State
+        let candidates = [];
+        let currentSort = 'ats_score';
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            setupTabs();
+            loadCandidates();
+            setupUploadArea();
+        });
+
+        // Tab Management
+        function setupTabs() {
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.addEventListener('click', () => {
+                    const tabName = tab.dataset.tab;
+                    
+                    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                    document.querySelectorAll('.content').forEach(c => c.classList.remove('active'));
+                    
+                    tab.classList.add('active');
+                    document.getElementById(tabName).classList.add('active');
+                });
+            });
+        }
+
+        // Upload Area
+        function setupUploadArea() {
+            const area = document.getElementById('uploadArea');
+            const input = document.getElementById('fileInput');
+
+            area.addEventListener('click', () => input.click());
+            input.addEventListener('change', () => {
+                console.log(`${input.files.length} files selected`);
+            });
+        }
+
+        function handleDragOver(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            document.getElementById('uploadArea').classList.add('dragover');
+        }
+
+        function handleDragLeave(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            document.getElementById('uploadArea').classList.remove('dragover');
+        }
+
+        function handleDrop(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            document.getElementById('uploadArea').classList.remove('dragover');
+            
+            const files = e.dataTransfer.files;
+            document.getElementById('fileInput').files = files;
+        }
+
+        // Upload Functions
+        async function uploadFiles() {
+            const fileInput = document.getElementById('fileInput');
+            const apiKey = document.getElementById('apiKey').value;
+            const jd = document.getElementById('jobDescription').value;
+            const files = fileInput.files;
+
+            if (!files.length) {
+                showStatus('uploadStatus', 'No files selected', 'error');
+                return;
+            }
+
+            const btnText = document.getElementById('uploadBtnText');
+            const spinner = document.getElementById('uploadSpinner');
+            btnText.style.display = 'none';
+            spinner.style.display = 'inline-block';
+
+            try {
+                const formData = new FormData();
+                for (let file of files) {
+                    formData.append('files[]', file);
+                }
+                if (apiKey) formData.append('api_key', apiKey);
+                if (jd) formData.append('jd', jd);
+
+                const response = await fetch('/api/batch-upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    showStatus('uploadStatus', `✅ Successfully processed ${result.processed} resumes`, 'success');
+                    fileInput.value = '';
+                    document.getElementById('jobDescription').value = '';
+                    await loadCandidates();
+                } else {
+                    showStatus('uploadStatus', `❌ ${result.error}`, 'error');
+                }
+            } catch (error) {
+                showStatus('uploadStatus', `❌ Upload failed: ${error.message}`, 'error');
+            } finally {
+                btnText.style.display = 'inline-block';
+                spinner.style.display = 'none';
+            }
+        }
+
+        // Load and Display Candidates
+        async function loadCandidates() {
+            try {
+                const response = await fetch('/api/candidates');
+                const result = await response.json();
+                
+                candidates = result.candidates || [];
+                updateStats();
+                displayCandidates();
+            } catch (error) {
+                console.error('Failed to load candidates:', error);
+            }
+        }
+
+        function updateStats() {
+            document.getElementById('totalCandidates').textContent = candidates.length;
+            
+            if (candidates.length > 0) {
+                const avgScore = Math.round(
+                    candidates.reduce((sum, c) => sum + (c.ats_score || 0), 0) / candidates.length
+                );
+                document.getElementById('avgScore').textContent = avgScore;
+            } else {
+                document.getElementById('avgScore').textContent = '--';
+            }
+        }
+
+        function sortCandidates(sortBy) {
+            currentSort = sortBy;
+            displayCandidates();
+        }
+
+        function displayCandidates() {
+            const container = document.getElementById('candidatesList');
+            
+            if (candidates.length === 0) {
+                container.innerHTML = '<div style="text-align: center; padding: 2rem; color: var(--text-muted);">No candidates yet. Upload resumes to get started.</div>';
+                return;
+            }
+
+            // Sort candidates
+            let sorted = [...candidates];
+            if (currentSort === 'ats_score') {
+                sorted.sort((a, b) => (b.ats_score || 0) - (a.ats_score || 0));
+            } else if (currentSort === 'match') {
+                sorted.sort((a, b) => (b.match_percentage || 0) - (a.match_percentage || 0));
+            } else if (currentSort === 'experience') {
+                sorted.sort((a, b) => (b.experience_years || 0) - (a.experience_years || 0));
+            }
+
+            container.innerHTML = sorted.map((candidate, idx) => `
+                <div class="card" onclick="showDetails(${idx})">
+                    <div class="candidate-card">
+                        <div class="candidate-info">
+                            <h3>${candidate.name}</h3>
+                            <p style="color: var(--text-muted); margin-bottom: 0.5rem;">${candidate.summary}</p>
+                            
+                            <div class="candidate-meta">
+                                <div class="meta-item">
+                                    <div class="meta-label">Email</div>
+                                    <div class="meta-value">${candidate.email}</div>
+                                </div>
+                                <div class="meta-item">
+                                    <div class="meta-label">Phone</div>
+                                    <div class="meta-value">${candidate.phone}</div>
+                                </div>
+                                <div class="meta-item">
+                                    <div class="meta-label">Experience</div>
+                                    <div class="meta-value">${candidate.experience_years} years</div>
+                                </div>
+                                <div class="meta-item">
+                                    <div class="meta-label">Education</div>
+                                    <div class="meta-value">${candidate.education_level}</div>
+                                </div>
+                            </div>
+
+                            <div class="skills">
+                                <div class="skills-title">Top Skills</div>
+                                <div class="skills-list">
+                                    ${(candidate.skills || []).slice(0, 5).map(skill => 
+                                        `<span class="skill-tag">${skill}</span>`
+                                    ).join('')}
+                                </div>
+                            </div>
+
+                            ${candidate.match_percentage ? `
+                                <div style="margin-top: 1rem;">
+                                    <div class="skills-title">JD Match: ${candidate.match_percentage}%</div>
+                                    <div class="progress-bar">
+                                        <div class="progress-fill" style="width: ${candidate.match_percentage}%"></div>
+                                    </div>
+                                </div>
+                            ` : ''}
+                        </div>
+
+                        <div class="score-badge">
+                            <div class="score-circle ${getScoreClass(candidate.ats_score)}">
+                                ${candidate.ats_score}
+                            </div>
+                            <div class="score-label">${getScoreLabel(candidate.ats_score)}</div>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function getScoreClass(score) {
+            if (score >= 80) return 'excellent';
+            if (score >= 60) return 'good';
+            if (score >= 40) return 'fair';
+            return 'weak';
+        }
+
+        function getScoreLabel(score) {
+            if (score >= 80) return 'Excellent';
+            if (score >= 60) return 'Good';
+            if (score >= 40) return 'Fair';
+            return 'Weak';
+        }
+
+        function showDetails(idx) {
+            const candidate = candidates[idx];
+            document.getElementById('modalTitle').textContent = candidate.name;
+            
+            const matchingSkills = (candidate.matching_skills || []).map(s => 
+                `<span class="skill-tag" style="background: rgba(16, 185, 129, 0.2); color: var(--success); border-color: rgba(16, 185, 129, 0.4);">${s}</span>`
+            ).join('');
+            
+            const missingSkills = (candidate.missing_skills || []).map(s => 
+                `<span class="skill-tag" style="background: rgba(239, 68, 68, 0.2); color: var(--danger); border-color: rgba(239, 68, 68, 0.4);">${s}</span>`
+            ).join('');
+
+            const html = `
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-bottom: 2rem;">
+                    <div>
+                        <h4 style="color: var(--text-muted); margin-bottom: 1rem;">Contact Information</h4>
+                        <div class="form-group">
+                            <label>Email</label>
+                            <input type="text" value="${candidate.email}" disabled style="background: var(--surface-2);">
+                        </div>
+                        <div class="form-group">
+                            <label>Phone</label>
+                            <input type="text" value="${candidate.phone}" disabled style="background: var(--surface-2);">
+                        </div>
+                        <div class="form-group">
+                            <label>Education</label>
+                            <input type="text" value="${candidate.education} (${candidate.education_level})" disabled style="background: var(--surface-2);">
+                        </div>
+                    </div>
+                    <div>
+                        <h4 style="color: var(--text-muted); margin-bottom: 1rem;">Scores</h4>
+                        <div class="form-group">
+                            <label>ATS Score</label>
+                            <input type="text" value="${candidate.ats_score}/100" disabled style="background: var(--surface-2);">
+                        </div>
+                        <div class="form-group">
+                            <label>Experience</label>
+                            <input type="text" value="${candidate.experience_years} years" disabled style="background: var(--surface-2);">
+                        </div>
+                        ${candidate.match_percentage ? `
+                            <div class="form-group">
+                                <label>JD Match</label>
+                                <input type="text" value="${candidate.match_percentage}%" disabled style="background: var(--surface-2);">
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+
+                <h4 style="color: var(--text-muted); margin-bottom: 1rem;">All Skills (${candidate.skills.length})</h4>
+                <div class="skills-list" style="margin-bottom: 2rem;">
+                    ${candidate.skills.map(skill => `<span class="skill-tag">${skill}</span>`).join('')}
+                </div>
+
+                ${matchingSkills ? `
+                    <h4 style="color: var(--success); margin-bottom: 1rem;">✅ Matching Skills</h4>
+                    <div class="skills-list" style="margin-bottom: 2rem;">
+                        ${matchingSkills}
+                    </div>
+                ` : ''}
+
+                ${missingSkills ? `
+                    <h4 style="color: var(--danger); margin-bottom: 1rem;">❌ Missing Skills</h4>
+                    <div class="skills-list" style="margin-bottom: 2rem;">
+                        ${missingSkills}
+                    </div>
+                ` : ''}
+
+                <h4 style="color: var(--text-muted); margin-bottom: 1rem;">Summary</h4>
+                <p style="line-height: 1.6; color: var(--text);">${candidate.summary}</p>
+
+                ${candidate.certifications.length > 0 ? `
+                    <h4 style="color: var(--text-muted); margin-bottom: 1rem; margin-top: 1.5rem;">Certifications</h4>
+                    <ul style="margin-left: 1.5rem;">
+                        ${candidate.certifications.map(cert => `<li>${cert}</li>`).join('')}
+                    </ul>
+                ` : ''}
+            `;
+
+            document.getElementById('modalBody').innerHTML = html;
+            document.getElementById('detailModal').classList.add('active');
+        }
+
+        function closeModal() {
+            document.getElementById('detailModal').classList.remove('active');
+        }
+
+        // RAG Functions
+        async function buildRag() {
+            const apiKey = document.getElementById('ragApiKey').value;
+
+            if (!apiKey) {
+                showStatus('ragStatus', '❌ API Key required', 'error');
+                return;
+            }
+
+            if (candidates.length === 0) {
+                showStatus('ragStatus', '❌ No candidates to build RAG from', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/rag/build', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ api_key: apiKey })
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    showStatus('ragStatus', `✅ ${result.message}`, 'success');
+                    document.getElementById('ragQuery').style.display = 'block';
+                } else {
+                    showStatus('ragStatus', `❌ ${result.error}`, 'error');
+                }
+            } catch (error) {
+                showStatus('ragStatus', `❌ ${error.message}`, 'error');
+            }
+        }
+
+        async function queryRag() {
+            const question = document.getElementById('ragQuestion').value.trim();
+
+            if (!question) {
+                showStatus('ragResult', '❌ Please enter a question', 'error');
+                return;
+            }
+
+            const btnText = document.getElementById('queryBtnText');
+            const spinner = document.getElementById('querySpinner');
+            btnText.style.display = 'none';
+            spinner.style.display = 'inline-block';
+
+            try {
+                const response = await fetch('/api/rag/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question })
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    const sourcesHtml = result.sources.map(s =>
+                        `<div class="skill-tag" style="margin-right: 0.5rem; margin-bottom: 0.5rem;">
+                            ${s.name} (${s.score}/100)
+                        </div>`
+                    ).join('');
+
+                    const html = `
+                        <div class="card">
+                            <h4>Answer</h4>
+                            <p style="line-height: 1.6; margin: 1rem 0;">${result.answer}</p>
+                            ${sourcesHtml ? `
+                                <h4 style="margin-top: 1.5rem;">Related Candidates</h4>
+                                <div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">
+                                    ${sourcesHtml}
+                                </div>
+                            ` : ''}
+                        </div>
+                    `;
+                    document.getElementById('ragResult').innerHTML = html;
+                } else {
+                    showStatus('ragResult', `❌ ${result.error}`, 'error');
+                }
+            } catch (error) {
+                showStatus('ragResult', `❌ ${error.message}`, 'error');
+            } finally {
+                btnText.style.display = 'inline-block';
+                spinner.style.display = 'none';
+            }
+        }
+
+        // Export and Reset
+        async function exportCandidates() {
+            if (candidates.length === 0) {
+                showStatus('settingsStatus', '❌ No candidates to export', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/export');
+                const data = await response.json();
+
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `candidates-${new Date().toISOString().split('T')[0]}.json`;
+                a.click();
+
+                showStatus('settingsStatus', '✅ Exported successfully', 'success');
+            } catch (error) {
+                showStatus('settingsStatus', `❌ ${error.message}`, 'error');
+            }
+        }
+
+        async function resetApp() {
+            if (!confirm('Are you sure? This will clear all candidates.')) return;
+
+            try {
+                const response = await fetch('/api/clear', { method: 'POST' });
+                const result = await response.json();
+
+                if (response.ok) {
+                    candidates = [];
+                    updateStats();
+                    displayCandidates();
+                    showStatus('settingsStatus', '✅ Application reset', 'success');
+                } else {
+                    showStatus('settingsStatus', `❌ ${result.error}`, 'error');
+                }
+            } catch (error) {
+                showStatus('settingsStatus', `❌ ${error.message}`, 'error');
+            }
+        }
+
+        function clearAll() {
+            document.getElementById('fileInput').value = '';
+            document.getElementById('jobDescription').value = '';
+            document.getElementById('uploadStatus').innerHTML = '';
+        }
+
+        // Utilities
+        function showStatus(elementId, message, type) {
+            const el = document.getElementById(elementId);
+            const alertClass = `alert alert-${type}`;
+            el.innerHTML = `<div class="${alertClass}">${message}</div>`;
+            
+            if (type === 'success') {
+                setTimeout(() => {
+                    el.innerHTML = '';
+                }, 5000);
+            }
+        }
+
+        // Close modal on background click
+        document.addEventListener('click', (e) => {
+            const modal = document.getElementById('detailModal');
+            if (e.target === modal) {
+                closeModal();
+            }
+        });
+    </script>
+</body>
+</html>

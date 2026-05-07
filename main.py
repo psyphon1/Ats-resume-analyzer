@@ -1,699 +1,410 @@
+#!/usr/bin/env python3
 """
-ATS Resume Analyzer - Production Ready | Enhanced Version
+ATS Resume Analyzer Pro - Application Launcher
+Modern Flask-based web application with AI-powered resume analysis
 """
 
-import streamlit as st
-import json, tempfile, os, re, io, logging, sys, time
-from datetime import datetime
-from typing import List, Dict, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-# Windows-compatible logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('ats.log', mode='w', encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
-
-try:
-    import fitz  # PyMuPDF
-    import pandas as pd
-    from rapidocr_onnxruntime import RapidOCR
-    from docx import Document
-    from groq import Groq
-    import gspread
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    from google.auth.transport.requests import Request
-    from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseDownload
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from langchain_community.vectorstores import FAISS
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-    from langchain.docstore.document import Document as LangchainDocument
-    from langchain.chains import ConversationalRetrievalChain
-    from langchain_groq import ChatGroq
-    from langchain.memory import ConversationBufferMemory
-    from langchain.prompts import PromptTemplate
-    logger.info("All dependencies loaded successfully")
-except ImportError as e:
-    st.error(f"Missing library: {e}\nRun: pip install -r requirements.txt")
-    st.stop()
-
-CONFIG = {
-    "groq_model": "llama-3.1-8b-instant",
-    "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
-    "chunk_size": 4000,  
-    "chunk_overlap": 0,
-    "max_resume_chars": 8000,
-    "max_tokens": 1500,
-    "temperature": 0.1,
-    "max_workers": 4,
-    "retry_delay": 2,
-    "max_retries": 3
-}
-
-GOOGLE_SCOPES = [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive.readonly'
-]
-
-class DocumentExtractor:
-    def __init__(self):
-        self.ocr = RapidOCR()
-    
-    def extract_text(self, path: str, ftype: str) -> str:
-        try:
-            if ftype == 'pdf':
-                text_content = ""
-                with fitz.open(path) as doc:
-                    for page in doc:
-                        page_text = page.get_text("text").strip()
-                        if len(page_text) > 50: 
-                            text_content += page_text + "\n"
-                        else:
-                            try:
-                                pix = page.get_pixmap()
-                                img_data = pix.tobytes("png")
-                                result, _ = self.ocr(img_data)
-                                if result:
-                                    text_content += "\n".join([line[1] for line in result]) + "\n"
-                            except Exception as e:
-                                logger.error(f"OCR failed on PDF page: {e}")
-                return text_content.strip()
-            elif ftype == 'docx':
-                return "\n".join([p.text.strip() for p in Document(path).paragraphs if p.text.strip()])
-            elif ftype in ['png', 'jpg', 'jpeg']:
-                result, _ = self.ocr(path)
-                return "\n".join([line[1] for line in result]) if result else ""
-        except Exception as e:
-            logger.error(f"Extract error: {e}")
-        return ""
-
-class GoogleDriveHandler:
-    def __init__(self, extractor):
-        self.extractor = extractor
-        creds = None
-        
-        # Try loading from streamlit secrets first (recommended for Cloud)
-        if "google_credentials" in st.secrets:
-            creds = Credentials.from_authorized_user_info(st.secrets["google_credentials"], GOOGLE_SCOPES)
-        elif os.path.exists('token.json'):
-            creds = Credentials.from_authorized_user_file('token.json', GOOGLE_SCOPES)
-            
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                try:
-                    creds.refresh(Request())
-                except:
-                    creds = None
-            
-            if not creds:
-                # On Streamlit Cloud, we can't run a local server
-                if os.environ.get("STREAMLIT_RUNTIME_ENV") == "cloud" or not os.path.exists('credentials.json'):
-                    logger.warning("Google Credentials missing or invalid. Skipping Drive integration.")
-                    self.gc = None
-                    self.drive = None
-                    return
-                
-                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', GOOGLE_SCOPES)
-                creds = flow.run_local_server(port=0)
-                with open('token.json', 'w') as token:
-                    token.write(creds.to_json())
-                    
-        self.gc = gspread.authorize(creds)
-        self.drive = build('drive', 'v3', credentials=creds)
-    
-    def process_sheet(self, url: str):
-        if not self.gc:
-            yield {"error": "Google Drive integration not configured. Please use direct file upload or check documentation for setup."}, 0, 0
-            return
-        try:
-            sheet = self.gc.open_by_url(url).get_worksheet(0)
-            records = sheet.get_all_records()
-            
-            link_col = next((k for r in records[:5] for k, v in r.items() if isinstance(v, str) and "drive.google.com" in v), None)
-            
-            if not link_col:
-                yield {"error": "No Drive links found"}, 0, 0
-                return
-            
-            for idx, row in enumerate(records, 1):
-                try:
-                    link = row.get(link_col, "").strip()
-                    if not link:
-                        continue
-                    
-                    match = re.search(r'/file/d/([a-zA-Z0-9_-]+)|id=([a-zA-Z0-9_-]+)', link)
-                    if not match:
-                        continue
-                    fid = match.group(1) or match.group(2)
-                    
-                    meta = self.drive.files().get(fileId=fid).execute()
-                    fname = f"temp_{fid}_{meta.get('name', 'file')}"
-                    
-                    request = self.drive.files().get_media(fileId=fid)
-                    fh = io.BytesIO()
-                    downloader = MediaIoBaseDownload(fh, request)
-                    while not downloader.next_chunk()[1]:
-                        pass
-                    
-                    with open(fname, 'wb') as f:
-                        f.write(fh.getvalue())
-                    
-                    ext_type = os.path.splitext(fname)[1].lower().strip('.')
-                    if not ext_type: 
-                        ext_type = 'pdf'
-                        
-                    text = self.extractor.extract_text(fname, ext_type)
-                    
-                    try:
-                        os.remove(fname)
-                    except PermissionError:
-                        pass
-                    
-                    if text:
-                        yield {"text": text, "metadata": row}, idx, len(records)
-                        
-                except Exception as e:
-                    logger.error(f"Row {idx} error: {e}")
-        except Exception as e:
-            logger.error(f"Sheet access error: {e}")
-            yield {"error": str(e)}, 0, 0
-
-class ResumeAnalyzer:
-    def __init__(self, api_key: str):
-        self.client = Groq(api_key=api_key)
-    
-    def analyze_resume(self, text: str, meta: Dict = None, jd: str = None) -> Dict:
-        jd_prompt = f"\n\nTarget Job Description:\n{jd}" if jd else ""
-        prompt = f"""Analyze this resume and extract data as JSON. 
-If a Job Description is provided, calculate a match score based on skills, experience, and role alignment.{jd_prompt}
-
-Resume Text:
-{text[:CONFIG['max_resume_chars']]}
-
-JSON format:
-{{
-    "name": "Full Name",
-    "email": "email@example.com",
-    "phone": "1234567890",
-    "skills": ["Skill1", "Skill2"],
-    "education": "Degree - University",
-    "experience_years": 0.0,
-    "match_percentage": 0,
-    "matching_skills": ["S1"],
-    "missing_skills": ["S2"],
-    "summary": "Brief 1-sentence professional summary",
-    "certifications": ["Cert1"],
-    "education_level": "Bachelors/Masters/PhD"
-}}
-
-RULES:
-1. **Experience**: Be precise. Sum total years across all roles. 
-2. **Match Score**: Be critical. A 100% match should be extremely rare. Compare specific technical depth.
-3. **Skills**: Categorize into Technical, Soft, and Tools if possible (return as flat list).
-4. **Summary**: Write a compelling one-sentence pitch for this candidate.
-"""
-        for attempt in range(CONFIG["max_retries"]):
-            try:
-                resp = self.client.chat.completions.create(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=CONFIG["groq_model"],
-                    temperature=CONFIG["temperature"],
-                    max_tokens=CONFIG["max_tokens"],
-                    response_format={"type": "json_object"}
-                )
-                
-                data = json.loads(resp.choices[0].message.content)
-                
-                # Post-processing
-                data["phone"] = self._extract_phone(text) if not data.get("phone") else re.sub(r'\D', '', str(data["phone"]))[-10:]
-                data["email"] = self._extract_regex(text, r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b') if not data.get("email") else data["email"]
-                
-                if not data.get("experience_years"):
-                    data["experience_years"] = self._calc_exp_fallback(text)
-                
-                # ATS Score is a composite of data quality + JD match
-                base_score = self._calc_score_enhanced(data)
-                if jd and data.get("match_percentage", 0) > 0:
-                    data["ats_score"] = int((base_score * 0.3) + (data["match_percentage"] * 0.7))
-                else:
-                    data["ats_score"] = base_score
-
-                if meta:
-                    if data.get("name") == "Full Name" or not data.get("name"):
-                        data["name"] = meta.get("filename", meta.get("Name", "Unknown"))
-
-                return data
-                
-            except Exception as e:
-                if attempt < CONFIG["max_retries"] - 1:
-                    time.sleep(CONFIG["retry_delay"] * (attempt + 1))
-                else:
-                    return self._create_fallback(text, meta)
-        
-        return self._create_fallback(text, meta)
-    
-    def _extract_phone(self, text: str) -> str:
-        patterns = [
-            r'\+?\d{1,3}[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}',
-            r'\b\d{10}\b'
-        ]
-        for pattern in patterns:
-            matches = re.findall(pattern, text[:2000])
-            if matches:
-                digits = re.sub(r'\D', '', matches[0])
-                if len(digits) >= 10:
-                    return digits[-10:]
-        return "N/A"
-    
-    def _extract_regex(self, text: str, pattern: str) -> str:
-        m = re.findall(pattern, text[:2000])
-        return (''.join(m[0]) if isinstance(m[0], tuple) else m[0]) if m else "N/A"
-    
-    def _extract_skills(self, text: str) -> List[str]:
-        skill_keywords = [
-            'python', 'java', 'javascript', 'typescript', 'c++', 'c#', 'php', 'swift', 'kotlin', 'go',
-            'html', 'css', 'react', 'angular', 'vue', 'node.js', 'django', 'flask', 'spring',
-            'sql', 'mysql', 'postgresql', 'mongodb', 'aws', 'azure', 'gcp', 'docker', 'kubernetes',
-            'git', 'jenkins', 'ci/cd', 'linux', 'machine learning', 'tensorflow', 'pytorch', 'pandas',
-            'agile', 'scrum', 'leadership', 'communication', 'problem solving'
-        ]
-        text_lower = text.lower()
-        return [s.capitalize() for s in skill_keywords if re.search(r'\b' + re.escape(s) + r'\b', text_lower)]
-    
-    def _calc_exp_fallback(self, text: str) -> float:
-        try:
-            years_mentioned = re.findall(r'\b(19[9]\d|20[0-2]\d)\b', text)
-            if len(years_mentioned) >= 2:
-                years_list = sorted([int(y) for y in set(years_mentioned)])
-                span = years_list[-1] - years_list[0]
-                if 1 <= span <= 40:
-                    return float(span)
-            return 0.0
-        except:
-            return 0.0
-    
-    def _calc_score_enhanced(self, d: Dict) -> int:
-        score = 0
-        if d.get("name") and d["name"] != "N/A": score += 10
-        if d.get("email"): score += 10
-        if d.get("phone") and d["phone"] != "N/A": score += 5
-        score += min(len(d.get("skills", [])) * 2, 40)
-        score += min(float(d.get("experience_years", 0)) * 5, 20)
-        if d.get("education") and d["education"] != "N/A": score += 15
-        return min(100, score)
-    
-    def _create_fallback(self, text: str, meta: Dict) -> Dict:
-        return {
-            "name": meta.get("Name", "Unknown") if meta else "Unknown",
-            "email": self._extract_regex(text, r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
-            "phone": self._extract_phone(text),
-            "skills": self._extract_skills(text),
-            "education": "N/A",
-            "experience_years": self._calc_exp_fallback(text),
-            "ats_score": 20
-        }
-
-class RAGPipeline:
-    def __init__(self, api_key: str):
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name=CONFIG["embedding_model"],
-            model_kwargs={'device': 'cpu'}
-        )
-        self.llm = ChatGroq(
-            groq_api_key=api_key,
-            model_name=CONFIG["groq_model"],
-            temperature=0.1,
-            max_tokens=800
-        )
-        self.candidates_data = []
-    
-    def build_vector_store(self, candidates: List[Dict]):
-        self.candidates_data = candidates
-        docs = []
-        
-        for idx, c in enumerate(candidates):
-            skills_str = ', '.join([str(s) for s in c.get('skills', [])])
-            
-            content = f"""CANDIDATE #{idx+1}
-NAME: {c.get('name', 'Unknown')}
-SCORE: {c.get('ats_score', 0)}
-EXP: {c.get('experience_years', 0)} years
-SKILLS: {skills_str}
-EDUCATION: {c.get('education', 'N/A')}
-"""
-            docs.append(LangchainDocument(
-                page_content=content,
-                metadata={"candidate_id": idx, "name": c.get('name'), "ats_score": c.get('ats_score', 0)}
-            ))
-        
-        splits = RecursiveCharacterTextSplitter(chunk_size=CONFIG["chunk_size"], chunk_overlap=0).split_documents(docs)
-        self.vector_store = FAISS.from_documents(splits, self.embeddings)
-        
-        template = """Context: {context}
-Question: {question}
-Answer concisely based on context."""
-        
-        self.qa_chain = ConversationalRetrievalChain.from_llm(
-            llm=self.llm,
-            retriever=self.vector_store.as_retriever(search_kwargs={"k": 5}),
-            return_source_documents=True,
-            combine_docs_chain_kwargs={"prompt": PromptTemplate(template=template, input_variables=["context", "question"])}
-        )
-    
-    def query(self, q: str) -> Dict:
-        try:
-            result = self.qa_chain({"question": q, "chat_history": []})
-            sources = list({s['candidate_id']: s for s in [d.metadata for d in result.get("source_documents", [])]}.values())[:3]
-            return {"answer": result["answer"], "sources": sources}
-        except Exception as e:
-            return {"error": str(e)}
-    
-    def get_candidate(self, idx: int) -> Optional[Dict]:
-        return self.candidates_data[idx] if 0 <= idx < len(self.candidates_data) else None
-
-def get_api_key():
-    """Retrieve API key from secrets, environment, or session state."""
-    if "groq_api_key" in st.secrets:
-        return st.secrets["groq_api_key"]
-    if os.environ.get("GROQ_API_KEY"):
-        return os.environ.get("GROQ_API_KEY")
-    return st.session_state.get("custom_api_key", "")
-
-def save_api_key(k: str):
-    st.session_state["custom_api_key"] = k
-
-def process_resume_parallel(args):
-    text, meta, analyzer, jd = args
-    return analyzer.analyze_resume(text, meta, jd)
-
-def apply_custom_style():
-    st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
-    
-    html, body, [data-testid="stSidebar"] {
-        font-family: 'Inter', sans-serif;
-    }
-    
-    .main {
-        background-color: #f8fafc;
-    }
-    
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 24px;
-        background-color: transparent;
-    }
-
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: white;
-        border-radius: 10px 10px 0px 0px;
-        gap: 1px;
-        padding-top: 10px;
-        padding-bottom: 10px;
-        border: 1px solid #e2e8f0;
-    }
-
-    .stTabs [aria-selected="true"] {
-        background-color: #3b82f6 !important;
-        color: white !important;
-    }
-    
-    div[data-testid="stMetricValue"] {
-        font-size: 2rem;
-        font-weight: 700;
-        color: #1e293b;
-    }
-    
-    .stButton>button {
-        width: 100%;
-        border-radius: 8px;
-        height: 3em;
-        background-color: #3b82f6;
-        color: white;
-        font-weight: 600;
-        border: none;
-        transition: all 0.3s ease;
-    }
-    
-    .stButton>button:hover {
-        background-color: #2563eb;
-        transform: translateY(-2px);
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-    }
-    
-    .css-1offfwp {
-        background-color: #ffffff;
-        border-radius: 12px;
-        padding: 2rem;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-    }
-    
-    /* Chat styling */
-    .stChatMessage {
-        border-radius: 12px;
-        padding: 1rem;
-        margin-bottom: 1rem;
-    }
-    /* Dataframe styling */
-    .stDataFrame {
-        border: 1px solid #e2e8f0;
-        border-radius: 8px;
-    }
-    
-    /* Metrics styling */
-    [data-testid="stMetric"] {
-        background-color: white;
-        padding: 1rem;
-        border-radius: 12px;
-        border: 1px solid #e2e8f0;
-        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
-    }
-    </style>
-    """, unsafe_allow_html=True)
+import os
+import sys
+import logging
+from pathlib import Path
 
 def main():
-    st.set_page_config(page_title="ATS Resume Analyzer Pro", page_icon="🚀", layout="wide")
-    apply_custom_style()
+    """Main entry point for the application."""
     
-    # Initialize session state
-    for k in ["candidates", "rag_pipeline", "chat_history", "trigger_query", "jd_text"]:
-        if k not in st.session_state:
-            st.session_state[k] = [] if k in ["candidates", "chat_history"] else (None if k != "jd_text" else "")
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    )
+    logger = logging.getLogger(__name__)
     
-    if "trigger_query" not in st.session_state:
-        st.session_state.trigger_query = False
+    # Check required environment
+    try:
+        import flask
+        import groq
+        import langchain
+    except ImportError as e:
+        logger.error(f"Missing required package: {e}")
+        logger.info("Run: pip install -r requirements.txt")
+        sys.exit(1)
+    
+    # Check for API key
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        logger.warning("GROQ_API_KEY not set. You can provide it in the web interface.")
+    
+    # Run the Flask server
+    logger.info("Starting ATS Resume Analyzer Pro...")
+    
+    try:
+        from server import app
+        port = int(os.environ.get("PORT", 5000))
+        
+        logger.info(f"🚀 Server running at http://localhost:{port}")
+        logger.info("Press Ctrl+C to stop")
+        
+        app.run(
+            host="0.0.0.0",
+            port=port,
+            debug=os.environ.get("FLASK_ENV") == "development"
+        )
+    except KeyboardInterrupt:
+        logger.info("\n👋 Server stopped")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Server error: {e}")
+        sys.exit(1)
 
+if __name__ == "__main__":
+    main()
+
+
+
+if __name__ == "__main__":
+    main()
+    defaults = {
+        "candidates": [],
+        "rag_pipeline": None,
+        "chat_history": [],
+        "jd_text": "",
+        "trigger_query": False,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def render_sidebar():
     api_key = get_api_key()
-    
     with st.sidebar:
-        st.title("⚙️ Configuration")
+        st.markdown("## ⚙️ Configuration")
+
         if not api_key:
-            st.warning("Groq API Key not found!")
-            new_key = st.text_input("Enter Groq API Key", type="password")
-            if st.button("Save Key"):
-                save_api_key(new_key)
+            st.warning("No Groq API key detected")
+            new_key = st.text_input("Groq API Key", type="password", placeholder="gsk_...")
+            if st.button("💾 Save Key") and new_key:
+                st.session_state["custom_api_key"] = new_key
                 st.rerun()
         else:
-            st.success("API Key Active")
-            if st.button("Change API Key"):
-                st.session_state.custom_api_key = ""
+            st.success("✅ API Key Active")
+            if st.button("🔄 Change Key"):
+                st.session_state.pop("custom_api_key", None)
                 st.rerun()
-        
-        st.markdown("---")
+
+        st.divider()
         st.markdown("### 📋 Job Description")
-        st.session_state.jd_text = st.text_area("Paste the target Job Description here to get accuracy scores.", 
-                                               value=st.session_state.jd_text, height=250)
-        
-        st.markdown("---")
+        st.session_state.jd_text = st.text_area(
+            "Paste JD for match scoring",
+            value=st.session_state.jd_text,
+            height=220,
+            placeholder="Senior Python Developer with 5+ years experience...",
+        )
+
+        st.divider()
         with st.expander("📖 How to Use"):
             st.markdown("""
-            1. **Set API Key**: Enter your Groq API key above.
-            2. **Add JD**: Paste the Job Description in the text area.
-            3. **Upload**: Drag & drop resumes (PDF, Docx, Images).
-            4. **Analyze**: Click '🚀 Process' to start.
-            5. **Insights**:
-               - **Chatbot**: Ask questions about candidates.
-               - **Results**: See scores, matches, and visualizations.
-            """)
-        
-        if st.button("🗑️ Clear All Data"):
+1. Enter your **Groq API Key**
+2. Paste a **Job Description** *(optional — enables match scoring)*
+3. **Upload resumes** (PDF, DOCX, or images)
+4. Click **🚀 Analyze Resumes**
+5. Explore results in **Results** tab
+6. Ask the **Chatbot** anything about candidates
+""")
+
+        st.divider()
+        stats = st.session_state.candidates
+        if stats:
+            st.markdown(f"**{len(stats)} candidates loaded**")
+            avg = sum(c.ats_score for c in stats) / len(stats)
+            st.markdown(f"Avg score: **{avg:.1f}** / 100")
+
+        if st.button("🗑️ Clear All"):
             st.session_state.clear()
             st.rerun()
-    
-    tab1, tab2, tab3 = st.tabs(["📥 Upload", "💬 Chatbot", "📊 Results"])
-    
-    with tab1:
-        col1, col2 = st.columns(2)
-        with col1:
-            files = st.file_uploader("Upload Files", type=['pdf', 'docx', 'png', 'jpg'], accept_multiple_files=True)
-        with col2:
-            sheet = st.text_input("Google Sheet URL")
-        
-        if st.button("🚀 Process", type="primary"):
-            if not files and not sheet:
-                st.error("No data provided")
-                st.stop()
-            
-            start = datetime.now()
-            ext = DocumentExtractor()
-            analyzer = ResumeAnalyzer(api_key)
-            candidates = []
-            file_data = []
-            if files:
-                prog = st.progress(0)
-                status = st.empty()
-                for idx, f in enumerate(files):
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=f".{f.name.split('.')[-1]}") as tmp:
-                        tmp.write(f.getvalue())
-                        tmp_path = tmp.name
-                    
-                    text = ext.extract_text(tmp_path, f.name.split('.')[-1].lower())
-                    try: os.remove(tmp_path)
-                    except: pass
-                    
-                    if text:
-                        file_data.append((text, {"filename": f.name}, analyzer, st.session_state.jd_text))
-                    prog.progress((idx + 1) / len(files))
-                    status.text(f"Extracted {idx+1}/{len(files)}")
-            
-            if file_data:
-                with st.spinner("Analyzing resumes with AI..."):
-                    batch_size = 4
-                    for i in range(0, len(file_data), batch_size):
-                        batch = file_data[i:i+batch_size]
-                        with ThreadPoolExecutor(max_workers=CONFIG["max_workers"]) as exe:
-                            futures = [exe.submit(process_resume_parallel, x) for x in batch]
-                            for f in as_completed(futures):
-                                res = f.result()
-                                if res: candidates.append(res)
-                        time.sleep(0.5)
-            
-            if sheet:
-                handler = GoogleDriveHandler(ext)
-                for data, _, _ in handler.process_sheet(sheet):
-                    if "error" in data:
-                        st.error(data["error"])
-                        continue
-                    if data.get("text"):
-                        candidates.append(analyzer.analyze_resume(data["text"], data.get("metadata"), st.session_state.jd_text))
 
-            if candidates:
-                st.session_state.candidates = sorted(candidates, key=lambda x: x.get("ats_score", 0), reverse=True)
-                rag = RAGPipeline(api_key)
-                rag.build_vector_store(st.session_state.candidates)
-                st.session_state.rag_pipeline = rag
-                st.success(f"Successfully processed {len(candidates)} resumes!")
-                st.balloons()
+    return api_key
+
+
+def render_upload_tab(api_key: str):
+    st.markdown("### 📥 Upload Resumes")
+    col1, col2 = st.columns([3, 2])
+    with col1:
+        files = st.file_uploader(
+            "Drag & drop resumes",
+            type=["pdf", "docx", "png", "jpg", "jpeg"],
+            accept_multiple_files=True,
+            help="Supports PDF, DOCX, and image files",
+        )
+    with col2:
+        sheet_url = st.text_input("Or paste a Google Sheet URL", placeholder="https://docs.google.com/spreadsheets/...")
+
+    if st.button("🚀 Analyze Resumes", type="primary"):
+        if not api_key:
+            st.error("Please add your Groq API key in the sidebar.")
+            return
+        if not files and not sheet_url:
+            st.warning("Please upload files or provide a Google Sheet URL.")
+            return
+
+        _run_pipeline(files, sheet_url, api_key)
+
+
+def _run_pipeline(files, sheet_url: str, api_key: str):
+    extractor = DocumentExtractor()
+    to_process: List[Tuple[str, str, str, str]] = []
+
+    # Extract text from uploaded files
+    if files:
+        progress = st.progress(0, text="Extracting text…")
+        for i, f in enumerate(files):
+            suffix = f".{f.name.rsplit('.', 1)[-1]}"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(f.getvalue())
+                tmp_path = tmp.name
+            text = extractor.extract_text(tmp_path, suffix.lstrip("."))
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+            if text.strip():
+                to_process.append((text, f.name, api_key, st.session_state.jd_text))
             else:
-                st.error("No data could be extracted. Please check file formats.")
+                st.warning(f"Could not extract text from **{f.name}**")
+            progress.progress((i + 1) / len(files), text=f"Extracted {i + 1}/{len(files)}")
 
-    with tab2:
-        if not st.session_state.rag_pipeline:
-            st.info("Upload resumes first.")
-        else:
-            qs = ["Top candidate?", "Python developers?", "Exp > 5 years?"]
-            cols = st.columns(3)
-            for i, q in enumerate(qs):
-                if cols[i].button(q, use_container_width=True):
-                    st.session_state.chat_history.append({"role": "user", "content": q})
-                    st.session_state.trigger_query = True
-            
-            if prompt := st.chat_input("Ask question..."):
-                st.session_state.chat_history.append({"role": "user", "content": prompt})
-                st.session_state.trigger_query = True
-            
-            if st.session_state.trigger_query and st.session_state.chat_history:
-                last_msg = st.session_state.chat_history[-1]
-                if last_msg["role"] == "user":
-                    with st.chat_message("user"):
-                        st.markdown(last_msg["content"])
-                        
-                    with st.chat_message("assistant"):
-                        with st.spinner("Thinking..."):
-                            res = st.session_state.rag_pipeline.query(last_msg["content"])
-                            if "error" in res:
-                                ans = f"Error: {res['error']}"
-                            else:
-                                ans = res["answer"]
-                                if res.get("sources"):
-                                    ans += "\n\n**Sources:**\n" + "\n".join([f"- {s.get('name')} ({s.get('ats_score')})" for s in res["sources"]])
-                            st.markdown(ans)
-                            st.session_state.chat_history.append({"role": "assistant", "content": ans})
-                
-                st.session_state.trigger_query = False
-                st.rerun()
-
-            for msg in reversed(st.session_state.chat_history):
-                if msg == st.session_state.chat_history[-1] and st.session_state.trigger_query:
+    # Process Google Sheet
+    if sheet_url:
+        with st.spinner("Reading Google Sheet…"):
+            handler = GoogleDriveHandler(extractor)
+            for data, idx, total in handler.process_sheet(sheet_url):
+                if "error" in data:
+                    st.error(f"Sheet error: {data['error']}")
                     continue
-                with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
+                if data.get("text"):
+                    to_process.append((data["text"], f"sheet_row_{idx}", api_key, st.session_state.jd_text))
 
-    with tab3:
-        if st.session_state.candidates:
-            st.header("📊 Analysis Overview")
-            
-            # Overview Metrics
-            m1, m2, m3 = st.columns(3)
-            avg_score = sum(c.get('ats_score', 0) for c in st.session_state.candidates) / len(st.session_state.candidates)
-            top_score = max(c.get('ats_score', 0) for c in st.session_state.candidates)
-            m1.metric("Avg ATS Score", f"{avg_score:.1f}")
-            m2.metric("Top Score", f"{top_score}")
-            m3.metric("Candidates", len(st.session_state.candidates))
+    if not to_process:
+        st.error("No usable text could be extracted from the provided files.")
+        return
 
-            # Distribution Chart
-            import plotly.express as px
-            df_scores = pd.DataFrame([{"Name": c.get('name'), "Score": c.get('ats_score', 0)} for c in st.session_state.candidates])
-            fig = px.bar(df_scores, x="Name", y="Score", title="ATS Score Distribution", 
-                         color="Score", color_continuous_scale="RdYlGn")
-            st.plotly_chart(fig, use_container_width=True)
+    # Run AI analysis in batches
+    candidates: List[Candidate] = []
+    with st.status(f"🧠 Analyzing {len(to_process)} resume(s)…", expanded=True) as status:
+        for batch_start in range(0, len(to_process), CFG.batch_size):
+            batch = to_process[batch_start: batch_start + CFG.batch_size]
+            st.write(f"Processing batch {batch_start // CFG.batch_size + 1}…")
+            with ThreadPoolExecutor(max_workers=CFG.max_workers) as executor:
+                futures = {executor.submit(process_file_worker, item): item for item in batch}
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result:
+                        candidates.append(result)
+            if batch_start + CFG.batch_size < len(to_process):
+                time.sleep(0.5)  # Rate limit buffer
 
-            st.divider()
-            
-            # Main Data Table
-            filtered_data = []
-            columns_to_keep = ['name', 'ats_score', 'match_percentage', 'experience_years', 'skills', 'education', 'email']
-            for c in st.session_state.candidates:
-                row = {k: c.get(k, 'N/A') for k in columns_to_keep}
-                if isinstance(row['skills'], list):
-                    row['skills'] = ", ".join(row['skills'])
-                filtered_data.append(row)
-            
-            df = pd.DataFrame(filtered_data)
-            st.dataframe(df.rename(columns={
-                'name': 'Name', 'ats_score': 'ATS Score', 'match_percentage': 'JD Match %',
-                'experience_years': 'Exp (Yrs)', 'skills': 'Top Skills', 'education': 'Education'
-            }), use_container_width=True)
+        if not candidates:
+            status.update(label="❌ No results", state="error")
+            st.error("Analysis produced no results. Check your files and API key.")
+            return
 
-            # Detailed Candidate View
-            st.subheader("🔍 Detailed Candidate Insights")
-            selected_name = st.selectbox("Select Candidate to view details", [c.get('name') for c in st.session_state.candidates])
-            if selected_name:
-                cand = next(c for c in st.session_state.candidates if c.get('name') == selected_name)
-                c1, c2 = st.columns([1, 2])
-                with c1:
-                    st.metric("ATS Score", cand.get('ats_score', 0))
-                    st.metric("JD Match", f"{cand.get('match_percentage', 0)}%")
-                with c2:
-                    st.write(f"**Summary:** {cand.get('summary', 'N/A')}")
-                    st.write(f"**Matching Skills:** {', '.join(cand.get('matching_skills', []))}")
-                    st.write(f"**Missing Skills:** {', '.join(cand.get('missing_skills', []))}")
-            
-            st.divider()
-            csv_buf = io.StringIO()
-            df.to_csv(csv_buf, index=False)
-            st.download_button("📥 Download Full Report (CSV)", csv_buf.getvalue(), "ats_results.csv", "text/csv")
+        # Sort by ATS score descending
+        candidates.sort(key=lambda c: c.ats_score, reverse=True)
+        st.session_state.candidates = candidates
+
+        # Build RAG pipeline
+        st.write("Building search index…")
+        rag = RAGPipeline(api_key)
+        rag.build(candidates)
+        st.session_state.rag_pipeline = rag
+
+        status.update(label=f"✅ Analyzed {len(candidates)} resume(s)!", state="complete")
+
+    st.success(f"Successfully analyzed **{len(candidates)}** resume(s)!")
+    st.balloons()
+
+
+def render_results_tab():
+    candidates: List[Candidate] = st.session_state.candidates
+    if not candidates:
+        st.info("No candidates yet. Upload resumes in the **Upload** tab.")
+        return
+
+    # ── KPI row ──
+    st.markdown("### 📊 Overview")
+    k1, k2, k3, k4 = st.columns(4)
+    avg = sum(c.ats_score for c in candidates) / len(candidates)
+    top = max(candidates, key=lambda c: c.ats_score)
+    avg_exp = sum(c.experience_years for c in candidates) / len(candidates)
+    k1.metric("Total Candidates", len(candidates))
+    k2.metric("Avg ATS Score", f"{avg:.1f}")
+    k3.metric("Top Scorer", f"{top.name} ({top.ats_score})")
+    k4.metric("Avg Experience", f"{avg_exp:.1f} yrs")
+
+    # ── Charts ──
+    st.plotly_chart(make_score_bar_chart(candidates), use_container_width=True)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.plotly_chart(make_scatter_chart(candidates), use_container_width=True)
+    with col2:
+        jd_fig = make_jd_match_chart(candidates)
+        if jd_fig:
+            st.plotly_chart(jd_fig, use_container_width=True)
         else:
-            st.info("No candidates processed yet. Go to the Upload tab to start.")
+            st.info("Provide a Job Description to see JD match scores.")
+
+    # ── Data Table ──
+    st.divider()
+    st.markdown("### 📋 Candidate Summary")
+
+    rows = []
+    for c in candidates:
+        rows.append({
+            "Name": c.name,
+            "ATS Score": c.ats_score,
+            "JD Match %": c.match_percentage or "—",
+            "Exp (yrs)": c.experience_years,
+            "Education": c.education_level,
+            "Skills Count": len(c.skills),
+            "Email": c.email,
+        })
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # ── Candidate Detail ──
+    st.divider()
+    st.markdown("### 🔍 Candidate Deep Dive")
+    names = [c.name for c in candidates]
+    selected = st.selectbox("Select candidate", names)
+    cand = next((c for c in candidates if c.name == selected), None)
+    if cand:
+        _render_candidate_detail(cand)
+
+    # ── Export ──
+    st.divider()
+    csv = df.to_csv(index=False)
+    st.download_button("📥 Download CSV Report", csv, "ats_results.csv", "text/csv")
+
+
+def _render_candidate_detail(c: Candidate):
+    col1, col2, col3 = st.columns([1, 1, 2])
+    color = score_color(c.ats_score)
+    with col1:
+        st.metric("ATS Score", c.ats_score)
+        st.metric("JD Match", f"{c.match_percentage}%" if c.match_percentage else "N/A")
+        st.metric("Experience", f"{c.experience_years} yrs")
+    with col2:
+        st.metric("Education", c.education_level)
+        st.metric("Email", c.email)
+        st.metric("Phone", c.phone)
+    with col3:
+        radar = make_radar_chart(c)
+        st.plotly_chart(radar, use_container_width=True)
+
+    if c.summary and c.summary != "N/A":
+        st.info(f"**Summary:** {c.summary}")
+
+    # Skills breakdown
+    if c.skill_categories:
+        st.markdown("**Skill Breakdown**")
+        for cat, skills in c.skill_categories.items():
+            tags = " ".join(f'<span class="skill-tag">{s}</span>' for s in skills)
+            st.markdown(f"**{cat}:** {tags}", unsafe_allow_html=True)
+
+    col_m, col_miss = st.columns(2)
+    with col_m:
+        if c.matching_skills:
+            tags = " ".join(f'<span class="skill-tag">{s}</span>' for s in c.matching_skills)
+            st.markdown(f"**✅ Matching Skills:**<br>{tags}", unsafe_allow_html=True)
+    with col_miss:
+        if c.missing_skills:
+            tags = " ".join(f'<span class="skill-tag missing-tag">{s}</span>' for s in c.missing_skills)
+            st.markdown(f"**❌ Missing Skills:**<br>{tags}", unsafe_allow_html=True)
+
+    if c.certifications:
+        st.markdown("**Certifications:** " + ", ".join(c.certifications))
+
+
+def render_chatbot_tab():
+    rag: Optional[RAGPipeline] = st.session_state.rag_pipeline
+    if not rag:
+        st.info("Process resumes first to enable the chatbot.")
+        return
+
+    st.markdown("### 💬 Ask About Candidates")
+    st.markdown("Ask anything about the uploaded candidates — rankings, skill gaps, experience, and more.")
+
+    # Quick questions
+    quick_qs = [
+        "Who is the best candidate overall?",
+        "List Python developers sorted by experience",
+        "Who has 5+ years of experience?",
+        "Which candidates have machine learning skills?",
+        "Who is missing the most required skills?",
+    ]
+    cols = st.columns(len(quick_qs))
+    for i, q in enumerate(quick_qs):
+        if cols[i].button(q, key=f"qq_{i}", use_container_width=True):
+            st.session_state.chat_history.append({"role": "user", "content": q})
+            st.session_state.trigger_query = True
+
+    st.divider()
+
+    # Chat input
+    if prompt := st.chat_input("Ask a question about the candidates…"):
+        st.session_state.chat_history.append({"role": "user", "content": prompt})
+        st.session_state.trigger_query = True
+
+    # Handle query
+    if st.session_state.trigger_query and st.session_state.chat_history:
+        last = st.session_state.chat_history[-1]
+        if last["role"] == "user":
+            with st.spinner("Searching candidate database…"):
+                result = rag.query(last["content"])
+                answer = result["answer"]
+                if result.get("sources"):
+                    src_lines = "\n".join(
+                        f"- **{s['name']}** (Score: {s['score']})" for s in result["sources"]
+                    )
+                    answer += f"\n\n**Referenced Candidates:**\n{src_lines}"
+                st.session_state.chat_history.append({"role": "assistant", "content": answer})
+        st.session_state.trigger_query = False
+        st.rerun()
+
+    # Render chat history
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+
+def main():
+    st.set_page_config(
+        page_title="ATS Resume Analyzer Pro",
+        page_icon="🚀",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+    init_session()
+
+    api_key = render_sidebar()
+
+    st.markdown("# 🚀 ATS Resume Analyzer Pro")
+    st.markdown("*AI-powered resume screening, scoring, and candidate intelligence*")
+    st.divider()
+
+    tab_upload, tab_results, tab_chat = st.tabs(["📥 Upload & Analyze", "📊 Results & Insights", "💬 AI Chatbot"])
+
+    with tab_upload:
+        render_upload_tab(api_key)
+
+    with tab_results:
+        render_results_tab()
+
+    with tab_chat:
+        render_chatbot_tab()
+
 
 if __name__ == "__main__":
     main()
